@@ -370,6 +370,12 @@ async function run() {
       res.send(result);
     });
 
+    // all transition
+    app.get("/allHistory", verifyToken, async (req, res) => {
+      const result = await transactionsCollection.find().toArray();
+      res.send(result);
+    });
+
     // End
 
     // Send a ping to confirm a successful connection
