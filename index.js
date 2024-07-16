@@ -31,6 +31,8 @@ async function run() {
     // Connect the client to the server	(optional starting in v4.7)
     // await client.connect();
 
+    // Start
+
     const userCollection = client.db("taCash").collection("Users");
     const transactionsCollection = client.db("taCash").collection("history");
 
@@ -94,6 +96,8 @@ async function run() {
       }
     });
 
+    // user role update
+
     app.patch("/users/update/:email", async (req, res) => {
       const { email } = req.params;
       const { role, status } = req.body;
@@ -130,6 +134,8 @@ async function run() {
         res.status(500).send("Internal Server Error");
       }
     });
+
+    // send Money
 
     app.post("/sendMoney", verifyToken, async (req, res) => {
       const { recipientEmail, amount, pin } = req.body;
@@ -210,7 +216,7 @@ async function run() {
       }
     });
 
-    // Example route for user registration
+    //user registration
     app.post("/register", async (req, res) => {
       const { name, email, phone, password } = req.body;
 
@@ -223,7 +229,7 @@ async function run() {
           email,
           phone,
           password: hashedPassword,
-          status: "pending", // Example: Set user status to pending for admin approval
+          status: "pending",
           role: "user",
           balance: 0,
         });
@@ -261,7 +267,7 @@ async function run() {
         return res.status(401).json({ message: "Invalid credentials" });
       }
 
-      // Return user data and JWT token
+      // JWT token
       const token = jwt.sign(
         { userId: user._id },
         process.env.ACCESS_TOKEN_SECRET,
@@ -270,6 +276,28 @@ async function run() {
 
       res.status(200).json({ message: "Login successful", token, user });
     });
+
+    // transition history
+    app.post("/historyData", async (req, res) => {
+      const item = req.body;
+      const historyResult = await transactionsCollection.insertOne(item);
+      // res.send(paymentResult);
+      const response = {
+        historyResult,
+      };
+      res.status(200).send(response);
+    });
+
+    // transition get by email
+    app.get("/history/:email", async (req, res) => {
+      const query = {
+        userEmail: req.params.email,
+      };
+      const result = await transactionsCollection.find(query).toArray();
+      res.send(result);
+    });
+
+    // End
 
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
