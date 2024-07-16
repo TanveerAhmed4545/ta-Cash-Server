@@ -32,6 +32,7 @@ async function run() {
     // await client.connect();
 
     const userCollection = client.db("taCash").collection("Users");
+    const transactionsCollection = client.db("taCash").collection("history");
 
     // Middleware to verify token
     const verifyToken = (req, res, next) => {
@@ -50,7 +51,7 @@ async function run() {
     };
 
     //  users data
-    app.get("/Users", verifyToken, async (req, res) => {
+    app.get("/Users", async (req, res) => {
       console.log("Fetching user data for user ID:", req.userId);
 
       try {
@@ -72,6 +73,7 @@ async function run() {
     //   res.send(result);
     // });
 
+    // get user Data
     app.get("/UsersData", async (req, res) => {
       const { search } = req.query;
 
@@ -126,6 +128,85 @@ async function run() {
       } catch (error) {
         console.error("Error updating user:", error);
         res.status(500).send("Internal Server Error");
+      }
+    });
+
+    app.post("/sendMoney", verifyToken, async (req, res) => {
+      const { recipientEmail, amount, pin } = req.body;
+      console.log(pin);
+      try {
+        // Fetch sender's details from database
+        const sender = await userCollection.findOne({
+          _id: new ObjectId(req.userId),
+        });
+
+        console.log("Sender:", sender); // Log sender object for debugging
+        console.log("Sender pin:", sender.password); // Log sender object for debugging
+
+        if (!sender || !sender.password) {
+          return res
+            .status(404)
+            .json({ message: "Sender not found or pin is missing" });
+        }
+
+        const pinMatch = await bcrypt.compare(pin, sender.password);
+
+        if (!pinMatch) {
+          return res.status(401).json({ message: "Incorrect PIN" });
+        }
+
+        // Check minimum transaction amount
+        const transactionAmount = parseInt(amount);
+        if (isNaN(transactionAmount) || transactionAmount < 50) {
+          return res
+            .status(400)
+            .json({ message: "Invalid transaction amount" });
+        }
+
+        // Calculate transaction fee
+        let fee = 0;
+        if (transactionAmount > 100) {
+          fee = 5;
+        }
+
+        // Calculate total amount after deducting fee
+        const totalAmount = transactionAmount - fee;
+
+        // Update sender's balance
+        const updatedSenderBalance = sender.balance - transactionAmount;
+        if (updatedSenderBalance < 0) {
+          return res.status(400).json({ message: "Insufficient balance" });
+        }
+        await userCollection.updateOne(
+          { _id: sender._id },
+          { $set: { balance: updatedSenderBalance } }
+        );
+
+        // Credit amount to recipient's balance
+        const recipient = await userCollection.findOne({
+          email: recipientEmail,
+        });
+        if (!recipient) {
+          return res.status(404).json({ message: "Recipient not found" });
+        }
+        const updatedRecipientBalance = recipient.balance + totalAmount;
+        const result = await userCollection.updateOne(
+          { _id: recipient._id },
+          { $set: { balance: updatedRecipientBalance } }
+        );
+
+        // Check if the update was successful
+        if (result.modifiedCount === 1) {
+          res.status(200).json({ message: "Transaction successful", result });
+        } else {
+          res.status(400).json({
+            message: "Transaction failed.",
+            result,
+          });
+        }
+      } catch (error) {
+        console.error("Transaction error:", error);
+        res.status(500).json({ message: "Transaction failed" });
       }
     });
 
