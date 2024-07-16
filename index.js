@@ -72,6 +72,63 @@ async function run() {
     //   res.send(result);
     // });
 
+    app.get("/UsersData", async (req, res) => {
+      const { search } = req.query;
+
+      const query = {};
+      if (search) {
+        query.$or = [
+          { name: { $regex: search, $options: "i" } },
+          { email: { $regex: search, $options: "i" } },
+        ];
+      }
+
+      try {
+        const result = await userCollection.find(query).toArray();
+        res.send(result);
+      } catch (error) {
+        console.error("Error fetching users:", error);
+        res.status(500).send("Internal Server Error");
+      }
+    });
+
+    app.patch("/users/update/:email", async (req, res) => {
+      const { email } = req.params;
+      const { role, status } = req.body;
+
+      try {
+        const user = await userCollection.findOne({ email });
+
+        if (!user) {
+          return res.status(404).send("User not found");
+        }
+
+        const update = { role, status };
+
+        if (status === "approved" && user.status !== "approved") {
+          if (role === "agent") {
+            update.balance = (user.balance || 0) + 10000; // Credit 10,000 Taka to agents
+          } else if (role === "user") {
+            update.balance = (user.balance || 0) + 40; // Credit 40 Taka to users
+          }
+        }
+
+        const result = await userCollection.updateOne(
+          { email },
+          { $set: update }
+        );
+
+        if (result.modifiedCount === 1) {
+          res.send("User role and status updated successfully!");
+        } else {
+          res.status(500).send("Failed to update user role and status");
+        }
+      } catch (error) {
+        console.error("Error updating user:", error);
+        res.status(500).send("Internal Server Error");
+      }
+    });
+
     // Example route for user registration
     app.post("/register", async (req, res) => {
       const { name, email, phone, password } = req.body;
