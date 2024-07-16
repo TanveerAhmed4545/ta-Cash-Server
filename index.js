@@ -76,7 +76,7 @@ async function run() {
     // });
 
     // get user Data
-    app.get("/UsersData", async (req, res) => {
+    app.get("/UsersData", verifyToken, async (req, res) => {
       const { search } = req.query;
 
       const query = {};
@@ -98,7 +98,7 @@ async function run() {
 
     // user role update
 
-    app.patch("/users/update/:email", async (req, res) => {
+    app.patch("/users/update/:email", verifyToken, async (req, res) => {
       const { email } = req.params;
       const { role, status } = req.body;
 
@@ -139,15 +139,15 @@ async function run() {
 
     app.post("/sendMoney", verifyToken, async (req, res) => {
       const { recipientEmail, amount, pin } = req.body;
-      console.log(pin);
+      // console.log(pin);
       try {
         // Fetch sender's details from database
         const sender = await userCollection.findOne({
           _id: new ObjectId(req.userId),
         });
 
-        console.log("Sender:", sender); // Log sender object for debugging
-        console.log("Sender pin:", sender.password); // Log sender object for debugging
+        // console.log("Sender:", sender); // Log sender object for debugging
+        // console.log("Sender pin:", sender.password); // Log sender object for debugging
 
         if (!sender || !sender.password) {
           return res
@@ -209,6 +209,72 @@ async function run() {
             message: "Transaction failed.",
             result,
           });
+        }
+      } catch (error) {
+        console.error("Transaction error:", error);
+        res.status(500).json({ message: "Transaction failed" });
+      }
+    });
+
+    // Cash Out
+    app.post("/cashOut", verifyToken, async (req, res) => {
+      const { recipientEmail, amount, pin } = req.body;
+      try {
+        // Fetch sender's details from the database
+        const sender = await userCollection.findOne({
+          _id: new ObjectId(req.userId),
+        });
+
+        if (!sender || !sender.password) {
+          return res
+            .status(404)
+            .json({ message: "Sender not found or pin is missing" });
+        }
+
+        const pinMatch = await bcrypt.compare(pin, sender.password);
+
+        if (!pinMatch) {
+          return res.status(401).json({ message: "Incorrect PIN" });
+        }
+
+        // Fetch  agent details from the database
+        const recipient = await userCollection.findOne({
+          email: recipientEmail,
+        });
+
+        if (!recipient || recipient.role !== "agent") {
+          return res.status(404).json({ message: "Agent not found" });
+        }
+
+        const transactionAmount = parseInt(amount);
+        const fee = transactionAmount * 0.015;
+        const totalAmountToDeduct = transactionAmount + fee;
+
+        if (sender.balance < totalAmountToDeduct) {
+          return res.status(400).json({ message: "Insufficient balance" });
+        }
+
+        // Deduct amount from sender's balance and add to recipient's balance
+        const updatedSenderBalance = sender.balance - totalAmountToDeduct;
+        const updatedRecipientBalance =
+          recipient.balance + transactionAmount + fee;
+
+        const result = await userCollection.updateOne(
+          { _id: sender._id },
+          { $set: { balance: updatedSenderBalance } }
+        );
+
+        const updateRecipient = await userCollection.updateOne(
+          { _id: recipient._id },
+          { $set: { balance: updatedRecipientBalance } }
+        );
+
+        if (result.modifiedCount === 1 && updateRecipient.modifiedCount === 1) {
+          return res
+            .status(200)
+            .json({ message: "Transaction successful", result });
+        } else {
+          return res.status(500).json({ message: "Transaction failed" });
         }
       } catch (error) {
         console.error("Transaction error:", error);
@@ -289,7 +355,7 @@ async function run() {
     });
 
     // transition get by email
-    app.get("/history/:email", async (req, res) => {
+    app.get("/history/:email", verifyToken, async (req, res) => {
       const query = {
         userEmail: req.params.email,
       };
