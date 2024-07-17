@@ -35,6 +35,7 @@ async function run() {
 
     const userCollection = client.db("taCash").collection("Users");
     const transactionsCollection = client.db("taCash").collection("history");
+    const transactionCollection = client.db("taCash").collection("transaction");
 
     // Middleware to verify token
     const verifyToken = (req, res, next) => {
@@ -77,6 +78,13 @@ async function run() {
 
     // get a user info by email from db
     app.get("/user-role/:email", async (req, res) => {
+      const email = req.params.email;
+      const result = await userCollection.findOne({ email });
+      res.send(result);
+    });
+
+    // get a user info by email from db
+    app.get("/user-status/:email", verifyToken, async (req, res) => {
       const email = req.params.email;
       const result = await userCollection.findOne({ email });
       res.send(result);
@@ -153,9 +161,6 @@ async function run() {
           _id: new ObjectId(req.userId),
         });
 
-        // console.log("Sender:", sender); // Log sender object for debugging
-        // console.log("Sender pin:", sender.password); // Log sender object for debugging
-
         if (!sender || !sender.password) {
           return res
             .status(404)
@@ -177,10 +182,7 @@ async function run() {
         }
 
         // Calculate transaction fee
-        let fee = 0;
-        if (transactionAmount > 100) {
-          fee = 5;
-        }
+        const fee = transactionAmount > 100 ? 5 : 0;
 
         // Calculate total amount after deducting fee
         const totalAmount = transactionAmount - fee;
@@ -210,7 +212,9 @@ async function run() {
 
         // Check if the update was successful
         if (result.modifiedCount === 1) {
-          res.status(200).json({ message: "Transaction successful", result });
+          res
+            .status(200)
+            .json({ message: "Transaction successful", result, totalAmount });
         } else {
           res.status(400).json({
             message: "Transaction failed.",
@@ -277,9 +281,11 @@ async function run() {
         );
 
         if (result.modifiedCount === 1 && updateRecipient.modifiedCount === 1) {
-          return res
-            .status(200)
-            .json({ message: "Transaction successful", result });
+          return res.status(200).json({
+            message: "Transaction successful",
+            result,
+            totalAmountToDeduct,
+          });
         } else {
           return res.status(500).json({ message: "Transaction failed" });
         }
@@ -363,8 +369,9 @@ async function run() {
 
     // transition get by email
     app.get("/history/:email", verifyToken, async (req, res) => {
+      const email = req.params.email;
       const query = {
-        userEmail: req.params.email,
+        $or: [{ userEmail: email }, { recipientEmail: email }],
       };
       const result = await transactionsCollection.find(query).toArray();
       res.send(result);
@@ -374,6 +381,117 @@ async function run() {
     app.get("/allHistory", verifyToken, async (req, res) => {
       const result = await transactionsCollection.find().toArray();
       res.send(result);
+    });
+
+    // Cash in req
+    app.post("/cashInRequest", verifyToken, async (req, res) => {
+      const { userEmail, agentEmail, amount } = req.body;
+
+      try {
+        const user = await userCollection.findOne({
+          _id: new ObjectId(req.userId),
+        });
+        const agent = await userCollection.findOne({
+          email: agentEmail,
+          role: "agent",
+        });
+
+        if (!user) {
+          return res.status(404).json({ message: "User not found" });
+        }
+
+        if (!agent) {
+          return res.status(404).json({ message: "Agent not found" });
+        }
+
+        const request = {
+          userId: req.userId,
+          agentEmail,
+          userEmail,
+          amount: parseInt(amount),
+          status: "pending", // initial status
+          type: "cash-in",
+        };
+
+        await transactionCollection.insertOne(request);
+        res.status(200).json({ message: "Cash-in request sent successfully" });
+      } catch (error) {
+        console.error("Cash-in request error:", error);
+        res.status(500).json({ message: "Failed to send cash-in request" });
+      }
+    });
+
+    // transition
+    // Fetch all transactions
+    app.get("/transactions", verifyToken, async (req, res) => {
+      try {
+        const transactions = await transactionCollection.find().toArray();
+        res.json(transactions);
+      } catch (err) {
+        res.status(500).json({ message: err.message });
+      }
+    });
+
+    // Manage a transaction (approve or reject cash-in)
+    app.post("/manageTransaction", verifyToken, async (req, res) => {
+      const { transactionId, action } = req.body;
+
+      if (!["approve", "reject"].includes(action)) {
+        return res.status(400).json({ message: "Invalid action" });
+      }
+
+      try {
+        const transaction = await transactionCollection.findOne({
+          _id: new ObjectId(transactionId),
+        });
+
+        if (!transaction) {
+          return res.status(404).json({ message: "Transaction not found" });
+        }
+
+        if (transaction.status !== "pending") {
+          return res
+            .status(400)
+            .json({ message: "Transaction already processed" });
+        }
+
+        if (action === "approve") {
+          // Process the cash-in transaction
+          const user = await userCollection.findOne({
+            _id: new ObjectId(transaction.userId),
+          });
+          const agent = await userCollection.findOne({
+            email: transaction.agentEmail,
+          });
+
+          // Deduct from agent and add to user
+          await userCollection.updateOne(
+            { _id: agent._id },
+            { $inc: { balance: -transaction.amount } }
+          );
+          await userCollection.updateOne(
+            { _id: user._id },
+            { $inc: { balance: transaction.amount } }
+          );
+
+          transaction.status = "approved";
+        } else if (action === "reject") {
+          transaction.status = "rejected";
+        }
+
+        const result = await transactionCollection.updateOne(
+          { _id: new ObjectId(transactionId) },
+          { $set: { status: transaction.status } }
+        );
+
+        res.status(200).json({
+          message: "Transaction processed successfully",
+          transaction,
+          result,
+        });
+      } catch (err) {
+        res.status(500).json({ message: err.message });
+      }
     });
 
     // End
