@@ -10,12 +10,16 @@ const port = process.env.PORT || 5000;
 // middleware
 app.use(
   cors({
-    origin: ["http://localhost:5173", "http://localhost:5174", "https://ta-cash-client.vercel.app", "https://ta-cash-server.vercel.app", "*"], // Allow Vercel frontend or change to app.use(cors()) for all
+    origin: [
+      "http://localhost:5173", 
+      "http://localhost:5174", 
+      "https://ta-cash-client.vercel.app", 
+      "https://ta-cash-sigma.vercel.app",
+      "https://ta-cash-server.vercel.app"
+    ],
     credentials: true,
   })
 );
-// Or simply app.use(cors()); to allow all by default
-app.use(cors());
 app.use(express.json());
 
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
