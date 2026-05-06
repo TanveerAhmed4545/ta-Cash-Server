@@ -52,6 +52,7 @@ async function run() {
     const transactionsCollection = client.db("taCash").collection("history");
     const transactionCollection = client.db("taCash").collection("transaction");
     const activityCollection = client.db("taCash").collection("activities");
+    const notificationCollection = client.db("taCash").collection("notifications");
 
     // Helper for logging activities
     const logActivity = async (email, desc, type = "system") => {
@@ -64,6 +65,22 @@ async function run() {
         });
       } catch (err) {
         console.error("Activity log error:", err);
+      }
+    };
+
+    // Helper for creating notifications
+    const createNotification = async (email, title, message, type = "info") => {
+      try {
+        await notificationCollection.insertOne({
+          userId: email,
+          title,
+          message,
+          type,
+          isRead: false,
+          timestamp: new Date()
+        });
+      } catch (err) {
+        console.error("Notification error:", err);
       }
     };
 
@@ -209,14 +226,37 @@ async function run() {
         { $push: { savingGoals: newGoal } }
       );
       await logActivity(email, `added a new savings goal for ${title}`, "goal");
+      
+      // Notification
+      await createNotification(
+        email,
+        "New Saving Goal Created",
+        `You've set a new goal: "${title}" with a target of $${target}.`,
+        "info"
+      );
+      
       res.json({ message: "Goal added successfully", result });
     });
 
-    // Get Recent Activities
-    app.get("/activities/:email", verifyToken, async (req, res) => {
+    // Get notifications
+    app.get("/notifications/:email", verifyToken, async (req, res) => {
       const email = req.params.email;
-      const activities = await activityCollection.find({ email }).sort({ _id: -1 }).limit(10).toArray();
-      res.json(activities);
+      const result = await notificationCollection
+        .find({ userId: email })
+        .sort({ timestamp: -1 })
+        .limit(20)
+        .toArray();
+      res.json(result);
+    });
+
+    // Mark all notifications as read
+    app.patch("/notifications/mark-read", verifyToken, async (req, res) => {
+      const { email } = req.body;
+      const result = await notificationCollection.updateMany(
+        { userId: email, isRead: false },
+        { $set: { isRead: true } }
+      );
+      res.json(result);
     });
 
     // user role update
@@ -320,6 +360,20 @@ async function run() {
 
         // Check if the update was successful
         if (result.modifiedCount === 1) {
+          // Notifications
+          await createNotification(
+            sender.email, 
+            "Money Sent", 
+            `You sent $${totalAmount} to ${recipientEmail}. Fee: $${fee}`, 
+            "send-money"
+          );
+          await createNotification(
+            recipientEmail, 
+            "Money Received", 
+            `You received $${totalAmount} from ${sender.email}.`, 
+            "send-money"
+          );
+
           res
             .status(200)
             .json({ message: "Transaction successful", result, totalAmount });
@@ -389,6 +443,20 @@ async function run() {
         );
 
         if (result.modifiedCount === 1 && updateRecipient.modifiedCount === 1) {
+          // Notifications
+          await createNotification(
+            sender.email, 
+            "Cash Out Successful", 
+            `You withdrew $${transactionAmount} via Agent ${recipientEmail}. Fee: $${fee}`, 
+            "cash-out"
+          );
+          await createNotification(
+            recipientEmail, 
+            "Cash Out Received", 
+            `User ${sender.email} cashed out $${transactionAmount} through you.`, 
+            "cash-out"
+          );
+
           return res.status(200).json({
             message: "Transaction successful",
             result,
@@ -430,6 +498,14 @@ async function run() {
         res
           .status(201)
           .json({ message: "User registered successfully", token });
+        
+        // Welcome Notification
+        await createNotification(
+          email,
+          "Welcome to Ta-Cash!",
+          "Thank you for joining our community. Start managing your finances today!",
+          "info"
+        );
       } catch (error) {
         console.error("Error registering user:", error);
         res.status(500).json({ message: "Internal server error" });
@@ -523,6 +599,15 @@ async function run() {
         };
 
         await transactionCollection.insertOne(request);
+
+        // Notification for Agent
+        await createNotification(
+          agentEmail,
+          "New Cash-In Request",
+          `User ${userEmail} has requested a Cash-In of $${amount}.`,
+          "cash-in"
+        );
+
         res.status(200).json({ message: "Cash-in request sent successfully" });
       } catch (error) {
         console.error("Cash-in request error:", error);
@@ -591,6 +676,14 @@ async function run() {
         const result = await transactionCollection.updateOne(
           { _id: new ObjectId(transactionId) },
           { $set: { status: transaction.status } }
+        );
+
+        // Create Notification for User
+        await createNotification(
+          transaction.userEmail, 
+          `Transaction ${action === 'approve' ? 'Successful' : 'Rejected'}`,
+          `Your ${transaction.type} request for $${transaction.amount} has been ${action === 'approve' ? 'completed' : 'rejected'}.`,
+          transaction.type
         );
 
         res.status(200).json({
