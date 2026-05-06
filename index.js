@@ -10,13 +10,20 @@ const port = process.env.PORT || 5000;
 // middleware
 app.use(
   cors({
-    origin: [
-      "http://localhost:5173", 
-      "http://localhost:5174", 
-      "https://ta-cash-client.vercel.app", 
-      "https://ta-cash-sigma.vercel.app",
-      "https://ta-cash-server.vercel.app"
-    ],
+    origin: (origin, callback) => {
+      const allowedOrigins = [
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "https://ta-cash-client.vercel.app",
+        "https://ta-cash-sigma.vercel.app",
+        "https://ta-cash-server.vercel.app"
+      ];
+      if (!origin || allowedOrigins.includes(origin) || origin.endsWith(".vercel.app")) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
     credentials: true,
   })
 );
