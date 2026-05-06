@@ -152,6 +152,43 @@ async function run() {
       res.json({ balance: user.balance || 0 });
     });
 
+    // Get user limits and activity stats
+    app.get("/user-limits/:email", verifyToken, async (req, res) => {
+      const email = req.params.email;
+      const user = await userCollection.findOne({ email });
+      if (!user) return res.status(404).json({ message: "User not found" });
+      
+      res.json({
+        dailyLimit: user.dailyLimit || 50000,
+        dailySpent: user.dailySpent || 0,
+        savingGoals: user.savingGoals || [
+          { id: 1, title: "New Car", target: 50000, current: 15000 },
+          { id: 2, title: "House Rent", target: 20000, current: 8000 }
+        ]
+      });
+    });
+
+    // Get recent activities (formatted history)
+    app.get("/activities/:email", verifyToken, async (req, res) => {
+      const email = req.params.email;
+      const history = await historyCollection
+        .find({ $or: [{ userEmail: email }, { recipientEmail: email }] })
+        .sort({ time: -1 })
+        .limit(5)
+        .toArray();
+      
+      const activities = history.map(item => ({
+        id: item._id,
+        desc: item.type === 'send-money' ? `Sent $${item.amount} to ${item.recipientEmail}` : 
+              item.type === 'cash-in' ? `Received $${item.amount} via Cash-In` :
+              item.type === 'cash-out' ? `Withdrew $${item.amount} via Cash-Out` :
+              `Performed a ${item.type} transaction`,
+        time: item.time || new Date()
+      }));
+
+      res.json(activities);
+    });
+
     // Add a saving goal
     app.post("/saving-goals", verifyToken, async (req, res) => {
       const { email, title, target, current } = req.body;
