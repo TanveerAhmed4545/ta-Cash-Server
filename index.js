@@ -1,3 +1,4 @@
+global.SlowBuffer = global.Buffer;
 const express = require("express");
 const app = express();
 const bcrypt = require("bcryptjs");
@@ -9,13 +10,16 @@ const port = process.env.PORT || 5000;
 // middleware
 app.use(
   cors({
-    origin: ["http://localhost:5173", "http://localhost:5174"],
+    origin: ["http://localhost:5173", "http://localhost:5174", "https://ta-cash-client.vercel.app", "https://ta-cash-server.vercel.app", "*"], // Allow Vercel frontend or change to app.use(cors()) for all
+    credentials: true,
   })
 );
+// Or simply app.use(cors()); to allow all by default
+app.use(cors());
 app.use(express.json());
 
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
-const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.dc9spgo.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
+const uri = `mongodb://${process.env.DB_USER}:${process.env.DB_PASS}@ac-pgkyffd-shard-00-00.dc9spgo.mongodb.net:27017,ac-pgkyffd-shard-00-01.dc9spgo.mongodb.net:27017,ac-pgkyffd-shard-00-02.dc9spgo.mongodb.net:27017/?ssl=true&replicaSet=atlas-13kwy0-shard-0&authSource=admin&retryWrites=true&w=majority&appName=Cluster0`;
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
@@ -36,6 +40,21 @@ async function run() {
     const userCollection = client.db("taCash").collection("Users");
     const transactionsCollection = client.db("taCash").collection("history");
     const transactionCollection = client.db("taCash").collection("transaction");
+    const activityCollection = client.db("taCash").collection("activities");
+
+    // Helper for logging activities
+    const logActivity = async (email, desc, type = "system") => {
+      try {
+        await activityCollection.insertOne({
+          email,
+          desc,
+          type,
+          time: new Date()
+        });
+      } catch (err) {
+        console.error("Activity log error:", err);
+      }
+    };
 
     // Middleware to verify token
     const verifyToken = (req, res, next) => {
@@ -109,6 +128,47 @@ async function run() {
         console.error("Error fetching users:", error);
         res.status(500).send("Internal Server Error");
       }
+    });
+
+    // Get user limits and saving goals
+    app.get("/user-limits/:email", verifyToken, async (req, res) => {
+      const email = req.params.email;
+      const user = await userCollection.findOne({ email });
+      if (!user) return res.status(404).json({ message: "User not found" });
+      
+      res.json({
+        dailyLimit: user.dailyLimit || 20000,
+        dailySpent: user.dailySpent || 0,
+        savingGoals: user.savingGoals || []
+      });
+    });
+
+    // Get user balance
+    app.get("/user-balance/:email", verifyToken, async (req, res) => {
+      const email = req.params.email;
+      const user = await userCollection.findOne({ email });
+      if (!user) return res.status(404).json({ message: "User not found" });
+      
+      res.json({ balance: user.balance || 0 });
+    });
+
+    // Add a saving goal
+    app.post("/saving-goals", verifyToken, async (req, res) => {
+      const { email, title, target, current } = req.body;
+      const newGoal = { id: new ObjectId(), title, target: parseInt(target), current: parseInt(current) };
+      const result = await userCollection.updateOne(
+        { email },
+        { $push: { savingGoals: newGoal } }
+      );
+      await logActivity(email, `added a new savings goal for ${title}`, "goal");
+      res.json({ message: "Goal added successfully", result });
+    });
+
+    // Get Recent Activities
+    app.get("/activities/:email", verifyToken, async (req, res) => {
+      const email = req.params.email;
+      const activities = await activityCollection.find({ email }).sort({ _id: -1 }).limit(10).toArray();
+      res.json(activities);
     });
 
     // user role update
@@ -353,6 +413,7 @@ async function run() {
         { expiresIn: "1h" } // Token expires in 1 hour
       );
 
+      await logActivity(email, "logged in", "auth");
       res.status(200).json({ message: "Login successful", token, user });
     });
 
@@ -515,3 +576,5 @@ app.get("/", (req, res) => {
 app.listen(port, () => {
   console.log(`taCash Tourist is Running on port ${port}`);
 });
+
+module.exports = app;
