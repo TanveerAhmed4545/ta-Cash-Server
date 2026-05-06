@@ -171,7 +171,7 @@ async function run() {
     // Get recent activities (formatted history)
     app.get("/activities/:email", verifyToken, async (req, res) => {
       const email = req.params.email;
-      const history = await historyCollection
+      const history = await transactionsCollection
         .find({ $or: [{ userEmail: email }, { recipientEmail: email }] })
         .sort({ time: -1 })
         .limit(5)
