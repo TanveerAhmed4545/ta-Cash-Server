@@ -5,7 +5,14 @@ const bcrypt = require("bcryptjs");
 const cors = require("cors");
 require("dotenv").config();
 const jwt = require("jsonwebtoken");
+const multer = require("multer");
+const axios = require("axios");
+const FormData = require("form-data");
 const port = process.env.PORT || 5000;
+
+// Configure multer
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
 
 // middleware
 app.use(
@@ -53,6 +60,7 @@ async function run() {
     const transactionCollection = client.db("taCash").collection("transaction");
     const activityCollection = client.db("taCash").collection("activities");
     const notificationCollection = client.db("taCash").collection("notifications");
+    const messagesCollection = client.db("taCash").collection("messages");
 
     // Helper for logging activities
     const logActivity = async (email, desc, type = "system") => {
@@ -67,6 +75,38 @@ async function run() {
         console.error("Activity log error:", err);
       }
     };
+
+    // Proxy image upload to ImgBB (Using user-provided key)
+    app.post("/upload-image", upload.single("image"), async (req, res) => {
+      try {
+        if (!req.file) {
+          return res.status(400).json({ message: "No image file provided" });
+        }
+
+        const IMGBB_KEY = process.env.IMGBB_KEY;
+        const formData = new FormData();
+        formData.append("image", req.file.buffer.toString("base64"));
+
+        const response = await axios.post(
+          `https://api.imgbb.com/1/upload?key=${IMGBB_KEY}`,
+          formData,
+          {
+            headers: {
+              ...formData.getHeaders(),
+            },
+          }
+        );
+
+        if (response.data.success) {
+          res.status(200).json({ url: response.data.data.display_url });
+        } else {
+          res.status(500).json({ message: "Failed to upload to ImgBB" });
+        }
+      } catch (error) {
+        console.error("Backend ImgBB upload error:", error.response?.data || error.message);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    });
 
     // Helper for creating notifications
     const createNotification = async (email, title, message, type = "info") => {
@@ -247,6 +287,44 @@ async function run() {
         .limit(20)
         .toArray();
       res.json(result);
+    });
+
+    // Get messages
+    app.get("/messages/:email", verifyToken, async (req, res) => {
+      const email = req.params.email;
+      const result = await messagesCollection
+        .find({ $or: [{ sender: email }, { recipient: email }] })
+        .sort({ timestamp: -1 })
+        .toArray();
+      res.json(result);
+    });
+
+    // Send a message
+    app.post("/messages", verifyToken, async (req, res) => {
+      const { recipient, message, subject } = req.body;
+      const sender = await userCollection.findOne({ _id: new ObjectId(req.userId) });
+      
+      const newMessage = {
+        sender: sender.email,
+        senderName: sender.name,
+        recipient,
+        subject: subject || "No Subject",
+        message,
+        isRead: false,
+        timestamp: new Date()
+      };
+
+      const result = await messagesCollection.insertOne(newMessage);
+      
+      // Create notification for recipient
+      await createNotification(
+        recipient,
+        "New Message",
+        `You received a new message from ${sender.name}.`,
+        "message"
+      );
+
+      res.status(201).json({ message: "Message sent", result });
     });
 
     // Mark all notifications as read
@@ -539,6 +617,82 @@ async function run() {
 
       await logActivity(email, "logged in", "auth");
       res.status(200).json({ message: "Login successful", token, user });
+    });
+
+    // Update PIN
+    app.patch("/update-pin", verifyToken, async (req, res) => {
+      const { oldPin, newPin } = req.body;
+      const userId = req.userId;
+
+      try {
+        const user = await userCollection.findOne({ _id: new ObjectId(userId) });
+        if (!user) {
+          return res.status(404).json({ message: "User not found" });
+        }
+
+        // Verify old PIN
+        const isMatch = await bcrypt.compare(oldPin, user.password);
+        if (!isMatch) {
+          return res.status(401).json({ message: "Incorrect current PIN" });
+        }
+
+        // Validate new PIN format (5 digits)
+        if (!/^\d{5}$/.test(newPin)) {
+          return res.status(400).json({ message: "New PIN must be exactly 5 digits" });
+        }
+
+        // Hash and update
+        const hashedPassword = await bcrypt.hash(newPin, 10);
+        await userCollection.updateOne(
+          { _id: new ObjectId(userId) },
+          { $set: { password: hashedPassword, lastPinChange: new Date() } }
+        );
+
+        await logActivity(user.email, "updated security PIN", "security");
+        await createNotification(
+          user.email,
+          "Security Update",
+          "Your account PIN has been successfully updated.",
+          "security"
+        );
+
+        res.status(200).json({ message: "PIN updated successfully" });
+      } catch (error) {
+        console.error("Error updating PIN:", error);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    });
+
+    // Update Profile (Name/Phone)
+    app.patch("/update-profile", verifyToken, async (req, res) => {
+      const { name, phone, photoURL } = req.body;
+      const userId = req.userId;
+
+      try {
+        const updateDoc = {};
+        if (name) updateDoc.name = name;
+        if (phone) updateDoc.phone = phone;
+        if (photoURL) updateDoc.photoURL = photoURL;
+
+        if (Object.keys(updateDoc).length === 0) {
+          return res.status(400).json({ message: "No fields to update" });
+        }
+
+        const result = await userCollection.updateOne(
+          { _id: new ObjectId(userId) },
+          { $set: updateDoc }
+        );
+
+        if (result.modifiedCount === 0) {
+          return res.status(404).json({ message: "User not found or no changes made" });
+        }
+
+        const updatedUser = await userCollection.findOne({ _id: new ObjectId(userId) });
+        res.status(200).json({ message: "Profile updated successfully", user: updatedUser });
+      } catch (error) {
+        console.error("Error updating profile:", error);
+        res.status(500).json({ message: "Internal server error" });
+      }
     });
 
     // transition history
