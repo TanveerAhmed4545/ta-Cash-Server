@@ -76,6 +76,35 @@ async function run() {
       }
     };
 
+    // Get user notifications
+    app.get("/notifications/:email", verifyToken, async (req, res) => {
+      try {
+        const email = req.params.email;
+        const result = await notificationCollection
+          .find({ userId: email })
+          .sort({ timestamp: -1 })
+          .limit(20)
+          .toArray();
+        res.status(200).json(result);
+      } catch (error) {
+        res.status(500).json({ message: error.message });
+      }
+    });
+
+    // Mark all notifications as read
+    app.patch("/notifications/mark-read", verifyToken, async (req, res) => {
+      try {
+        const { email } = req.body;
+        const result = await notificationCollection.updateMany(
+          { userId: email, isRead: false },
+          { $set: { isRead: true } }
+        );
+        res.status(200).json(result);
+      } catch (error) {
+        res.status(500).json({ message: error.message });
+      }
+    });
+
     // Proxy image upload to ImgBB (Using user-provided key)
     app.post("/upload-image", upload.single("image"), async (req, res) => {
       try {
