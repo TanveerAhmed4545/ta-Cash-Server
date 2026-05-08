@@ -48,33 +48,72 @@ const client = new MongoClient(uri, {
   },
 });
 
+// Database Collections (Initialized globally)
+const userCollection = client.db("taCash").collection("Users");
+const transactionsCollection = client.db("taCash").collection("history");
+const transactionCollection = client.db("taCash").collection("transaction");
+const activityCollection = client.db("taCash").collection("activities");
+const notificationCollection = client.db("taCash").collection("notifications");
+const messagesCollection = client.db("taCash").collection("messages");
+
+// Helper for logging activities
+const logActivity = async (email, desc, type = "system") => {
+  try {
+    await activityCollection.insertOne({
+      email,
+      desc,
+      type,
+      time: new Date()
+    });
+  } catch (err) {
+    console.error("Activity log error:", err);
+  }
+};
+
+// Middleware to verify token
+const verifyToken = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).send({ message: "Forbidden access" });
+  }
+  const token = authHeader.split(" ")[1];
+  jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
+    if (err) {
+      return res.status(401).send({ message: "Forbidden access" });
+    }
+    req.userId = decoded.userId;
+    next();
+  });
+};
+
+// Helper for creating notifications
+const createNotification = async (email, title, message, type = "info") => {
+  try {
+    await notificationCollection.insertOne({
+      userId: email,
+      title,
+      message,
+      type,
+      isRead: false,
+      timestamp: new Date()
+    });
+  } catch (err) {
+    console.error("Notification error:", err);
+  }
+};
+
 async function run() {
   try {
-    // Connect the client to the server	(optional starting in v4.7)
-    // await client.connect();
+    // Connect the client to the server
+    await client.connect();
+    console.log("Connected to MongoDB");
+  } catch (err) {
+    console.error("MongoDB Connection Error:", err);
+  }
+}
+run().catch(console.dir);
 
-    // Start
-
-    const userCollection = client.db("taCash").collection("Users");
-    const transactionsCollection = client.db("taCash").collection("history");
-    const transactionCollection = client.db("taCash").collection("transaction");
-    const activityCollection = client.db("taCash").collection("activities");
-    const notificationCollection = client.db("taCash").collection("notifications");
-    const messagesCollection = client.db("taCash").collection("messages");
-
-    // Helper for logging activities
-    const logActivity = async (email, desc, type = "system") => {
-      try {
-        await activityCollection.insertOne({
-          email,
-          desc,
-          type,
-          time: new Date()
-        });
-      } catch (err) {
-        console.error("Activity log error:", err);
-      }
-    };
+// --- ROUTES START HERE ---
 
     // Get user notifications
     app.get("/notifications/:email", verifyToken, async (req, res) => {
@@ -880,18 +919,7 @@ async function run() {
     });
 
     // End
-
-    // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
-    );
-  } finally {
-    // Ensures that the client will close when you finish/error
-    // await client.close();
-  }
-}
-run().catch(console.dir);
+});
 
 app.get("/", (req, res) => {
   res.send("taCash is running");
