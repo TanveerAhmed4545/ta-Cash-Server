@@ -176,40 +176,8 @@ run().catch(console.dir);
       }
     });
 
-    // Helper for creating notifications
-    const createNotification = async (email, title, message, type = "info") => {
-      try {
-        await notificationCollection.insertOne({
-          userId: email,
-          title,
-          message,
-          type,
-          isRead: false,
-          timestamp: new Date()
-        });
-      } catch (err) {
-        console.error("Notification error:", err);
-      }
-    };
-
-    // Middleware to verify token
-    const verifyToken = (req, res, next) => {
-      const authHeader = req.headers.authorization;
-      if (!authHeader) {
-        return res.status(401).send({ message: "Forbidden access" });
-      }
-      const token = authHeader.split(" ")[1];
-      jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
-        if (err) {
-          return res.status(401).send({ message: "Forbidden access" });
-        }
-        req.userId = decoded.userId;
-        next();
-      });
-    };
-
     //  users data
-    app.get("/Users", async (req, res) => {
+    app.get("/Users", verifyToken, async (req, res) => {
       console.log("Fetching user data for user ID:", req.userId);
 
       try {
@@ -919,7 +887,7 @@ run().catch(console.dir);
     });
 
     // End
-});
+
 
 app.get("/", (req, res) => {
   res.send("taCash is running");
