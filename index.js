@@ -805,11 +805,72 @@ run().catch(console.dir);
       }
     });
 
-    // transition
-    // Fetch all transactions
+    // Agent Cash in req (to Admin)
+    app.post("/agentCashInRequest", verifyToken, async (req, res) => {
+      const { amount } = req.body;
+
+      try {
+        const agent = await userCollection.findOne({
+          _id: new ObjectId(req.userId),
+        });
+
+        if (!agent || agent.role !== "agent") {
+          return res.status(403).json({ message: "Only agents can make this request" });
+        }
+
+        const request = {
+          userId: req.userId,
+          agentEmail: agent.email,
+          userEmail: "admin", // Marking it for admin
+          amount: parseInt(amount),
+          status: "pending",
+          type: "agent-cash-in",
+          timestamp: new Date()
+        };
+
+        await transactionCollection.insertOne(request);
+
+        // Find admins to notify
+        const admins = await userCollection.find({ role: "admin" }).toArray();
+        for (const admin of admins) {
+          await createNotification(
+            admin.email,
+            "New Agent Cash-In Request",
+            `Agent ${agent.email} has requested a Cash-In of $${amount}.`,
+            "agent-cash-in"
+          );
+        }
+
+        res.status(200).json({ message: "Request sent to Admin successfully" });
+      } catch (error) {
+        console.error("Agent cash-in request error:", error);
+        res.status(500).json({ message: "Failed to send request" });
+      }
+    });
+
+    // Fetch transactions (filtered by role)
     app.get("/transactions", verifyToken, async (req, res) => {
       try {
-        const transactions = await transactionCollection.find().toArray();
+        const user = await userCollection.findOne({
+          _id: new ObjectId(req.userId),
+        });
+        
+        if (!user) {
+          return res.status(404).json({ message: "User not found" });
+        }
+
+        let query = {};
+        // If agent, only show their own transactions
+        if (user.role === "agent") {
+          query = { agentEmail: user.email };
+        } 
+        // If user, show their own transactions
+        else if (user.role === "user") {
+          query = { userEmail: user.email };
+        }
+        // If admin, show all (query remains {})
+
+        const transactions = await transactionCollection.find(query).toArray();
         res.json(transactions);
       } catch (err) {
         res.status(500).json({ message: err.message });
@@ -840,23 +901,55 @@ run().catch(console.dir);
         }
 
         if (action === "approve") {
-          // Process the cash-in transaction
-          const user = await userCollection.findOne({
-            _id: new ObjectId(transaction.userId),
-          });
-          const agent = await userCollection.findOne({
-            email: transaction.agentEmail,
-          });
+          // Process the transaction based on type
+          if (transaction.type === "agent-cash-in") {
+            // Agent requested money from Admin
+            const agent = await userCollection.findOne({
+              email: transaction.agentEmail,
+            });
 
-          // Deduct from agent and add to user
-          await userCollection.updateOne(
-            { _id: agent._id },
-            { $inc: { balance: -transaction.amount } }
-          );
-          await userCollection.updateOne(
-            { _id: user._id },
-            { $inc: { balance: transaction.amount } }
-          );
+            if (!agent) {
+              return res.status(404).json({ message: "Agent not found" });
+            }
+
+            // Increment agent balance
+            await userCollection.updateOne(
+              { _id: agent._id },
+              { $inc: { balance: transaction.amount } }
+            );
+
+            // Optionally deduct from admin balance here if needed
+            // const admin = await userCollection.findOne({ role: "admin" });
+            // await userCollection.updateOne({ _id: admin._id }, { $inc: { balance: -transaction.amount } });
+
+          } else {
+            // Regular user cash-in (requested from Agent)
+            const user = await userCollection.findOne({
+              _id: new ObjectId(transaction.userId),
+            });
+            const agent = await userCollection.findOne({
+              email: transaction.agentEmail,
+            });
+
+            if (!user || !agent) {
+              return res.status(404).json({ message: "User or Agent not found" });
+            }
+
+            // Check if agent has enough balance
+            if (agent.balance < transaction.amount) {
+              return res.status(400).json({ message: "Agent has insufficient balance" });
+            }
+
+            // Deduct from agent and add to user
+            await userCollection.updateOne(
+              { _id: agent._id },
+              { $inc: { balance: -transaction.amount } }
+            );
+            await userCollection.updateOne(
+              { _id: user._id },
+              { $inc: { balance: transaction.amount } }
+            );
+          }
 
           transaction.status = "approved";
         } else if (action === "reject") {
