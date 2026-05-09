@@ -412,6 +412,30 @@ run().catch(console.dir);
       }
     });
 
+    // Delete User/Agent
+    app.delete("/users/:email", verifyToken, async (req, res) => {
+      const { email } = req.params;
+
+      try {
+        // Security check: Only admins can delete users
+        const requester = await userCollection.findOne({ _id: new ObjectId(req.userId) });
+        if (!requester || requester.role !== "admin") {
+          return res.status(403).json({ message: "Forbidden: Only admins can delete users" });
+        }
+
+        const result = await userCollection.deleteOne({ email });
+
+        if (result.deletedCount === 1) {
+          res.status(200).json({ message: "User deleted successfully" });
+        } else {
+          res.status(404).json({ message: "User not found" });
+        }
+      } catch (error) {
+        console.error("Error deleting user:", error);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    });
+
     // send Money
 
     app.post("/sendMoney", verifyToken, async (req, res) => {
