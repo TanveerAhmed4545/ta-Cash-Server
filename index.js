@@ -31,6 +31,7 @@ app.use(
         callback(new Error("Not allowed by CORS"));
       }
     },
+    methods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
     credentials: true,
   })
 );
@@ -53,10 +54,11 @@ const userCollection = client.db("taCash").collection("Users");
 const transactionsCollection = client.db("taCash").collection("history");
 const transactionCollection = client.db("taCash").collection("transaction");
 const activityCollection = client.db("taCash").collection("activities");
-const notificationCollection = client.db("taCash").collection("notifications");
 const messagesCollection = client.db("taCash").collection("messages");
+const notificationCollection = client.db("taCash").collection("notifications");
+const systemConfigCollection = client.db("taCash").collection("systemConfig");
+const auditCollection = client.db("taCash").collection("auditLogs");
 
-// Helper for logging activities
 const logActivity = async (email, desc, type = "system") => {
   try {
     await activityCollection.insertOne({
@@ -67,6 +69,41 @@ const logActivity = async (email, desc, type = "system") => {
     });
   } catch (err) {
     console.error("Activity log error:", err);
+  }
+};
+
+// Helper for logging Admin Audit Logs
+const logAudit = async (adminEmail, action, targetEmail = null, details = {}) => {
+  try {
+    await auditCollection.insertOne({
+      adminEmail,
+      action,
+      targetEmail,
+      details,
+      timestamp: new Date()
+    });
+  } catch (err) {
+    console.error("Audit log error:", err);
+  }
+};
+
+// Middleware to check if system is in maintenance mode
+const checkMaintenance = async (req, res, next) => {
+  try {
+    const config = await systemConfigCollection.findOne({ key: "maintenanceMode" });
+    if (config && config.value === true) {
+      // Allow admins to bypass maintenance
+      const user = await userCollection.findOne({ _id: new ObjectId(req.userId) });
+      if (user && user.role === "admin") {
+        return next();
+      }
+      return res.status(503).json({ 
+        message: "System is currently under maintenance. Transactions are temporarily disabled." 
+      });
+    }
+    next();
+  } catch (err) {
+    next();
   }
 };
 
@@ -115,20 +152,6 @@ run().catch(console.dir);
 
 // --- ROUTES START HERE ---
 
-    // Get user notifications
-    app.get("/notifications/:email", verifyToken, async (req, res) => {
-      try {
-        const email = req.params.email;
-        const result = await notificationCollection
-          .find({ userId: email })
-          .sort({ timestamp: -1 })
-          .limit(20)
-          .toArray();
-        res.status(200).json(result);
-      } catch (error) {
-        res.status(500).json({ message: error.message });
-      }
-    });
 
     // Mark all notifications as read
     app.patch("/notifications/mark-read", verifyToken, async (req, res) => {
@@ -234,18 +257,7 @@ run().catch(console.dir);
       }
     });
 
-    // Get user limits and saving goals
-    app.get("/user-limits/:email", verifyToken, async (req, res) => {
-      const email = req.params.email;
-      const user = await userCollection.findOne({ email });
-      if (!user) return res.status(404).json({ message: "User not found" });
-      
-      res.json({
-        dailyLimit: user.dailyLimit || 20000,
-        dailySpent: user.dailySpent || 0,
-        savingGoals: user.savingGoals || []
-      });
-    });
+
 
     // Get user balance
     app.get("/user-balance/:email", verifyToken, async (req, res) => {
@@ -296,7 +308,7 @@ run().catch(console.dir);
     // Add a saving goal
     app.post("/saving-goals", verifyToken, async (req, res) => {
       const { email, title, target, current } = req.body;
-      const newGoal = { id: new ObjectId(), title, target: parseInt(target), current: parseInt(current) };
+      const newGoal = { id: new ObjectId().toString(), title, target: parseInt(target), current: parseInt(current) };
       const result = await userCollection.updateOne(
         { email },
         { $push: { savingGoals: newGoal } }
@@ -312,6 +324,70 @@ run().catch(console.dir);
       );
       
       res.json({ message: "Goal added successfully", result });
+    });
+
+    // Delete a saving goal
+    app.delete("/saving-goals/:email/:id", verifyToken, async (req, res) => {
+      const { email, id } = req.params;
+      console.log(`DELETE request received for email: ${email}, id: ${id}`);
+      
+      try {
+        const filterId = !isNaN(id) && id.length < 10 ? Number(id) : id;
+        console.log(`Using filterId: ${filterId} (type: ${typeof filterId})`);
+        
+        let result = await userCollection.updateOne(
+          { email },
+          { $pull: { savingGoals: { id: filterId } } }
+        );
+        
+        console.log(`First attempt modifiedCount: ${result.modifiedCount}`);
+        
+        if (result.modifiedCount === 0 && id.length === 24) {
+           console.log(`Trying fallback with ObjectId...`);
+           result = await userCollection.updateOne(
+            { email },
+            { $pull: { savingGoals: { id: new ObjectId(id) } } }
+           );
+           console.log(`Fallback modifiedCount: ${result.modifiedCount}`);
+        }
+        
+        // Also try with title if id was actually a title
+        if (result.modifiedCount === 0) {
+           console.log(`Trying fallback with title matching...`);
+           result = await userCollection.updateOne(
+            { email },
+            { $pull: { savingGoals: { title: id } } }
+           );
+           console.log(`Title fallback modifiedCount: ${result.modifiedCount}`);
+        }
+        
+        // Handle the case where they try to delete mock data
+        if (result.modifiedCount === 0) {
+           const user = await userCollection.findOne({ email });
+           if (user && (!user.savingGoals || user.savingGoals.length === 0)) {
+              console.log(`User has no real saving goals, initializing without the mock deleted one.`);
+              const defaultGoals = [
+                { id: 1, title: "New Car", target: 50000, current: 15000 },
+                { id: 2, title: "House Rent", target: 20000, current: 8000 }
+              ].filter(g => g.id !== filterId);
+              
+              result = await userCollection.updateOne(
+                { email },
+                { $set: { savingGoals: defaultGoals } }
+              );
+           }
+        }
+        
+        if (result.modifiedCount > 0) {
+          await logActivity(email, "deleted a savings plan", "goal");
+          res.json({ message: "Goal deleted successfully", result });
+        } else {
+          res.status(404).json({ message: "Goal not found" });
+        }
+      } catch (error) {
+        console.error("Delete goal error:", error);
+        res.status(500).json({ message: "Internal server error" });
+      }
     });
 
     // Get notifications
@@ -363,6 +439,129 @@ run().catch(console.dir);
       res.status(201).json({ message: "Message sent", result });
     });
 
+    // --- NEW ANALYTICS & ADMIN FEATURES ---
+
+    // Get System Maintenance Status
+    app.get("/admin/system-config", verifyToken, async (req, res) => {
+      const config = await systemConfigCollection.findOne({ key: "maintenanceMode" });
+      res.json({ maintenanceMode: config ? config.value : false });
+    });
+
+    // Toggle Maintenance Mode
+    app.post("/admin/toggle-maintenance", verifyToken, async (req, res) => {
+      const { status } = req.body;
+      const requester = await userCollection.findOne({ _id: new ObjectId(req.userId) });
+      if (!requester || requester.role !== "admin") {
+        return res.status(403).json({ message: "Forbidden" });
+      }
+
+      await systemConfigCollection.updateOne(
+        { key: "maintenanceMode" },
+        { $set: { value: status, updatedAt: new Date(), updatedBy: requester.email } },
+        { upsert: true }
+      );
+
+      await logAudit(requester.email, `Maintenance Mode ${status ? 'Enabled' : 'Disabled'}`);
+      res.json({ message: `Maintenance Mode ${status ? 'Activated' : 'Deactivated'}` });
+    });
+
+    // Get Audit Logs (Admin Only)
+    app.get("/admin/audit-logs", verifyToken, async (req, res) => {
+      const requester = await userCollection.findOne({ _id: new ObjectId(req.userId) });
+      if (!requester || requester.role !== "admin") return res.status(403).json({ message: "Forbidden" });
+
+      const logs = await auditCollection.find().sort({ timestamp: -1 }).limit(100).toArray();
+      res.json(logs);
+    });
+
+    // Admin Revenue Stats
+    app.get("/admin/revenue-stats", verifyToken, async (req, res) => {
+      const sevenDaysAgo = new Date();
+      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+      const transactions = await transactionsCollection.find({
+        time: { $gte: sevenDaysAgo }
+      }).toArray();
+      
+      const stats = transactions.reduce((acc, curr) => {
+        const date = curr.time ? new Date(curr.time).toLocaleDateString() : 'Unknown';
+        if (!acc[date]) acc[date] = 0;
+        if (curr.type === 'send-money' && curr.amount > 100) acc[date] += 5;
+        if (curr.type === 'cash-out') acc[date] += (curr.amount * 0.005);
+        return acc;
+      }, {});
+
+      const formattedStats = Object.keys(stats).map(date => ({
+        date,
+        revenue: stats[date]
+      })).slice(-7);
+
+      res.json(formattedStats);
+    });
+
+    // Admin Dashboard Overall Stats
+    app.get("/admin/dashboard-stats", verifyToken, async (req, res) => {
+      try {
+        const totalUsers = await userCollection.countDocuments();
+        
+        const sendMoneyCount = await transactionsCollection.countDocuments({ type: 'send-money' });
+        const cashOutCount = await transactionsCollection.countDocuments({ type: 'cash-out' });
+        const cashInCount = await transactionsCollection.countDocuments({ type: 'cash-in' });
+
+        res.json({
+          activeUsers: totalUsers,
+          transactionVolume: [
+            { name: 'Send Money', value: sendMoneyCount },
+            { name: 'Cash Out', value: cashOutCount },
+            { name: 'Cash In', value: cashInCount }
+          ]
+        });
+      } catch (error) {
+        console.error("Dashboard stats error:", error);
+        res.status(500).json({ message: "Internal server error" });
+      }
+    });
+
+    // User Income/Expense Stats
+    app.get("/user/stats/:email", verifyToken, async (req, res) => {
+      const email = req.params.email;
+      const history = await transactionsCollection.find({
+        $or: [{ userEmail: email }, { recipientEmail: email }]
+      }).toArray();
+
+      const stats = history.reduce((acc, curr) => {
+        const month = curr.time ? new Date(curr.time).toLocaleString('default', { month: 'short' }) : 'Jan';
+        if (!acc[month]) acc[month] = { month, income: 0, expense: 0 };
+
+        if (curr.recipientEmail === email) {
+          acc[month].income += curr.amount;
+        } else if (curr.userEmail === email) {
+          acc[month].expense += curr.amount;
+        }
+        return acc;
+      }, {});
+
+      res.json(Object.values(stats));
+    });
+
+    // Update User Tier (Admin Only)
+    app.patch("/admin/update-tier", verifyToken, async (req, res) => {
+      const { email, tier } = req.body;
+      const requester = await userCollection.findOne({ _id: new ObjectId(req.userId) });
+      if (!requester || requester.role !== "admin") return res.status(403).json({ message: "Forbidden" });
+
+      const limits = { silver: 20000, gold: 50000, platinum: 100000 };
+      const limit = limits[tier.toLowerCase()] || 20000;
+
+      await userCollection.updateOne(
+        { email },
+        { $set: { tier: tier.toLowerCase(), dailyLimit: limit } }
+      );
+
+      await logAudit(requester.email, `Updated User Tier: ${email}`, email, { tier });
+      res.json({ message: `User promoted to ${tier} tier` });
+    });
+
     // Mark all notifications as read
     app.patch("/notifications/mark-read", verifyToken, async (req, res) => {
       const { email } = req.body;
@@ -388,6 +587,12 @@ run().catch(console.dir);
 
         const update = { role, status };
 
+        // Handle role specific tier/limit if needed
+        if (role === "agent") {
+           update.tier = user.tier || "silver";
+           update.dailyLimit = user.dailyLimit || 50000;
+        }
+
         if (status === "approved" && user.status !== "approved") {
           if (role === "agent") {
             update.balance = (user.balance || 0) + 10000; // Credit 10,000 Taka to agents
@@ -402,6 +607,8 @@ run().catch(console.dir);
         );
 
         if (result.modifiedCount === 1) {
+          const requester = await userCollection.findOne({ _id: new ObjectId(req.userId) });
+          await logAudit(requester.email, `Updated User Role/Status: ${email}`, email, { role, status });
           res.send("User role and status updated successfully!");
         } else {
           res.status(500).send("Failed to update user role and status");
@@ -438,7 +645,7 @@ run().catch(console.dir);
 
     // send Money
 
-    app.post("/sendMoney", verifyToken, async (req, res) => {
+    app.post("/sendMoney", verifyToken, checkMaintenance, async (req, res) => {
       const { recipientEmail, amount, pin } = req.body;
       // console.log(pin);
       try {
@@ -528,7 +735,7 @@ run().catch(console.dir);
     });
 
     // Cash Out
-    app.post("/cashOut", verifyToken, async (req, res) => {
+    app.post("/cashOut", verifyToken, checkMaintenance, async (req, res) => {
       const { recipientEmail, amount, pin } = req.body;
       try {
         // Fetch sender's details from the database
@@ -624,7 +831,10 @@ run().catch(console.dir);
           password: hashedPassword,
           status: "pending",
           role: "user",
+          tier: "silver", // Default tier
+          dailyLimit: 20000,
           balance: 0,
+          createdAt: new Date()
         });
 
         // Generate JWT token for authentication
@@ -783,7 +993,7 @@ run().catch(console.dir);
     });
 
     // Cash in req
-    app.post("/cashInRequest", verifyToken, async (req, res) => {
+    app.post("/cashInRequest", verifyToken, checkMaintenance, async (req, res) => {
       const { userEmail, agentEmail, amount } = req.body;
 
       try {
@@ -998,12 +1208,20 @@ run().catch(console.dir);
           transaction,
           result,
         });
+
+        // Audit Log for Admin/Agent action
+        const executor = await userCollection.findOne({ _id: new ObjectId(req.userId) });
+        await logAudit(
+          executor.email,
+          `Transaction ${action === 'approve' ? 'Approved' : 'Rejected'}`,
+          transaction.userEmail,
+          { type: transaction.type, amount: transaction.amount }
+        );
+
       } catch (err) {
         res.status(500).json({ message: err.message });
       }
     });
-
-    // End
 
 
 app.get("/", (req, res) => {
