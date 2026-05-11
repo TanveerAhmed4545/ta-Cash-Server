@@ -58,6 +58,7 @@ const messagesCollection = client.db("taCash").collection("messages");
 const notificationCollection = client.db("taCash").collection("notifications");
 const systemConfigCollection = client.db("taCash").collection("systemConfig");
 const auditCollection = client.db("taCash").collection("auditLogs");
+const requestsCollection = client.db("taCash").collection("requests");
 
 const logActivity = async (email, desc, type = "system") => {
   try {
@@ -439,6 +440,43 @@ run().catch(console.dir);
       res.status(201).json({ message: "Message sent", result });
     });
 
+    // Request Money
+    app.post("/requests", verifyToken, async (req, res) => {
+      const { recipientEmail, amount, notes } = req.body;
+      const sender = await userCollection.findOne({ _id: new ObjectId(req.userId) });
+      
+      const newRequest = {
+        requester: sender.email,
+        requesterName: sender.name,
+        payer: recipientEmail,
+        amount: parseInt(amount),
+        notes: notes || "",
+        status: "pending",
+        timestamp: new Date()
+      };
+
+      const result = await requestsCollection.insertOne(newRequest);
+      
+      await createNotification(
+        recipientEmail,
+        "Money Request",
+        `${sender.name} has requested $${amount} from you.`,
+        "request"
+      );
+
+      res.status(201).json({ message: "Request sent", result });
+    });
+
+    // Get Pending Requests for a user
+    app.get("/requests/:email", verifyToken, async (req, res) => {
+      const email = req.params.email;
+      const result = await requestsCollection
+        .find({ payer: email, status: "pending" })
+        .sort({ timestamp: -1 })
+        .toArray();
+      res.json(result);
+    });
+
     // --- NEW ANALYTICS & ADMIN FEATURES ---
 
     // Get System Maintenance Status
@@ -772,44 +810,41 @@ run().catch(console.dir);
           return res.status(400).json({ message: "Insufficient balance" });
         }
 
-        // Deduct amount from sender's balance and add to recipient's balance
-        const updatedSenderBalance = sender.balance - totalAmountToDeduct;
-        const updatedRecipientBalance =
-          recipient.balance + transactionAmount + fee;
+        // --- FRAUD DETECTION ENGINE ---
+        const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000);
+        const recentTxCount = await transactionsCollection.countDocuments({
+          senderEmail: sender.email,
+          time: { $gte: fifteenMinsAgo }
+        });
 
-        const result = await userCollection.updateOne(
-          { _id: sender._id },
-          { $set: { balance: updatedSenderBalance } }
-        );
+        const isHighVolume = transactionAmount > 5000;
+        const isHighVelocity = recentTxCount >= 5;
 
-        const updateRecipient = await userCollection.updateOne(
-          { _id: recipient._id },
-          { $set: { balance: updatedRecipientBalance } }
-        );
-
-        if (result.modifiedCount === 1 && updateRecipient.modifiedCount === 1) {
-          // Notifications
-          await createNotification(
-            sender.email, 
-            "Cash Out Successful", 
-            `You withdrew $${transactionAmount} via Agent ${recipientEmail}. Fee: $${fee}`, 
-            "cash-out"
-          );
-          await createNotification(
-            recipientEmail, 
-            "Cash Out Received", 
-            `User ${sender.email} cashed out $${transactionAmount} through you.`, 
-            "cash-out"
-          );
-
-          return res.status(200).json({
-            message: "Transaction successful",
-            result,
-            totalAmountToDeduct,
-          });
-        } else {
-          return res.status(500).json({ message: "Transaction failed" });
+        if (isHighVolume || isHighVelocity) {
+           const flaggedTx = {
+              senderEmail: sender.email,
+              recipientEmail: recipientEmail,
+              amount: transactionAmount,
+              fee: fee,
+              type: "cash-out",
+              status: "flagged",
+              flagReason: isHighVelocity ? "High Velocity (>5 tx/15m)" : "High Volume (>$5000)",
+              time: new Date(),
+           };
+           await transactionsCollection.insertOne(flaggedTx);
+           await createNotification(sender.email, "Security Alert", `Your $${transactionAmount} cash-out via ${recipientEmail} was flagged for review.`, "security");
+           await logActivity(sender.email, `Flagged transaction of $${transactionAmount} via ${recipientEmail}`, "security");
+           return res.json({ flagged: true, message: "Transaction flagged for security review due to unusual activity." });
         }
+        // -------------------------------
+
+        await userCollection.updateOne({ _id: sender._id }, { $inc: { balance: -totalAmountToDeduct } });
+        await userCollection.updateOne({ _id: recipient._id }, { $inc: { balance: transactionAmount } });
+
+        await createNotification(sender.email, "Cash Out Successful", `You withdrew $${transactionAmount} via Agent ${recipientEmail}. Fee: $${fee}`, "cash-out");
+        await createNotification(recipientEmail, "Cash Out Received", `User ${sender.email} cashed out $${transactionAmount} through you.`, "cash-out");
+
+        return res.status(200).json({ message: "Transaction successful" });
       } catch (error) {
         console.error("Transaction error:", error);
         res.status(500).json({ message: "Transaction failed" });
@@ -1152,10 +1187,6 @@ run().catch(console.dir);
               { $inc: { balance: transaction.amount } }
             );
 
-            // Optionally deduct from admin balance here if needed
-            // const admin = await userCollection.findOne({ role: "admin" });
-            // await userCollection.updateOne({ _id: admin._id }, { $inc: { balance: -transaction.amount } });
-
           } else {
             // Regular user cash-in (requested from Agent)
             const user = await userCollection.findOne({
@@ -1223,6 +1254,23 @@ run().catch(console.dir);
       }
     });
 
+    app.patch("/admin/resolve-flag", verifyToken, async (req, res) => {
+      const { id, action } = req.body;
+      const updateStatus = action === 'approve' ? 'success' : 'rejected';
+      
+      const result = await transactionsCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { status: updateStatus } }
+      );
+      
+      res.json(result);
+    });
+
+    // Get all flagged transactions
+    app.get("/admin/flagged-transactions", verifyToken, async (req, res) => {
+      const flagged = await transactionsCollection.find({ status: "flagged" }).sort({ time: -1 }).toArray();
+      res.json(flagged);
+    });
 
 app.get("/", (req, res) => {
   res.send("taCash is running");
