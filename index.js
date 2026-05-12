@@ -402,6 +402,23 @@ run().catch(console.dir);
       res.json(result);
     });
 
+    // Delete a notification
+    app.delete("/notifications/:id", verifyToken, async (req, res) => {
+      const id = req.params.id;
+      const result = await notificationCollection.deleteOne({ _id: new ObjectId(id) });
+      res.json(result);
+    });
+
+    // Mark a single notification as read
+    app.patch("/notifications/:id/read", verifyToken, async (req, res) => {
+      const id = req.params.id;
+      const result = await notificationCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { isRead: true } }
+      );
+      res.json(result);
+    });
+
     // Get messages
     app.get("/messages/:email", verifyToken, async (req, res) => {
       const email = req.params.email;
